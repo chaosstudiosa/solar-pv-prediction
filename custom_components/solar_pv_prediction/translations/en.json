@@ -1,0 +1,83 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Solar PV Prediction (History Based)",
+        "description": "Pick the entities this instance should use. You can tune parameters later under Options.",
+        "data": {
+          "name": "Name",
+          "pv_entities": "PV power sensors (one or more)",
+          "soc_entity": "Battery SOC sensor",
+          "inverter_entity": "Inverter power sensor",
+          "weather_entity": "Weather entity"
+        }
+      }
+    },
+    "error": {
+      "required": "At least one PV entity is required."
+    },
+    "abort": {
+      "already_configured": "This instance is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "basic": {
+        "title": "Basic options",
+        "description": "Curve time shift and optional power clamp. History days and average window are now live controls on the device.",
+        "data": {
+          "shift_minutes": "Shift minutes (+ delays the curve, - advances it)",
+          "max_pv_clamp": "Max PV clamp in watts (0 disables)"
+        }
+      },
+      "advanced": {
+        "title": "Advanced options",
+        "description": "Tuning for the smoothing spline and the auto-adjust loop.",
+        "data": {
+          "tension": "Spline tension (0 = smooth, 1 = hugs hour steps)",
+          "up_rate": "Trim up rate (0..1)",
+          "down_rate": "Trim down rate (0..1)",
+          "soc_deadband": "SOC deadband (%)",
+          "load_deadband": "Inverter deadband for curtailment guard (W)",
+          "recovery_deadband": "Recovery deadband (W)",
+          "soc_threshold": "SOC threshold for curtailment guard (%)",
+          "min_pv_update": "Minimum predicted PV to auto-adjust (W)",
+          "sunrise_fallback": "Sunrise fallback factor (unknown weather)"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "pv_raw": {
+        "name": "PV Raw"
+      },
+      "pv_history": {
+        "name": "PV History"
+      },
+      "pv_trimmed": {
+        "name": "PV Trimmed"
+      },
+      "pv_power_average": {
+        "name": "PV Power Average"
+      },
+      "inverter_power_average": {
+        "name": "Inverter Power Average"
+      },
+      "pv_available_power": {
+        "name": "PV Available Power"
+      }
+    },
+    "number": {
+      "trim_factor": {
+        "name": "Trim Factor"
+      },
+      "history_days": {
+        "name": "History Days"
+      },
+      "average_minutes": {
+        "name": "Average Minutes"
+      }
+    }
+  }
+}
