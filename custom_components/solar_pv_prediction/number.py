@@ -113,7 +113,7 @@ class HistoryDaysNumber(RestoreNumber):
     _attr_native_min_value = HISTORY_DAYS_MIN
     _attr_native_max_value = HISTORY_DAYS_MAX
     _attr_native_step = HISTORY_DAYS_STEP
-    _attr_mode = NumberMode.BOX
+    _attr_mode = NumberMode.SLIDER
     _attr_native_unit_of_measurement = "days"
 
     def __init__(self, entry: ConfigEntry) -> None:
@@ -156,7 +156,7 @@ class AverageMinutesNumber(RestoreNumber):
     _attr_native_min_value = AVERAGE_MINUTES_MIN
     _attr_native_max_value = AVERAGE_MINUTES_MAX
     _attr_native_step = AVERAGE_MINUTES_STEP
-    _attr_mode = NumberMode.BOX
+    _attr_mode = NumberMode.SLIDER
     _attr_native_unit_of_measurement = "min"
 
     def __init__(self, entry: ConfigEntry) -> None:
