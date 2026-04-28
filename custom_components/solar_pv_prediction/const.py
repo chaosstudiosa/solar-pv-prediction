@@ -54,7 +54,7 @@ AVERAGE_MINUTES_STEP = 1
 # --- Trim factor bounds ----------------------------------------------------
 TRIM_MIN = 0.05
 TRIM_MAX = 1.50
-TRIM_STEP = 0.01
+TRIM_STEP = 0.001
 
 # --- Weather condition -> trim factor map (sunrise reset) ------------------
 WEATHER_FACTOR_MAP: dict[str, float] = {

@@ -22,6 +22,7 @@ from homeassistant.util import dt as dt_util
 from .average import PowerAverager
 from .const import (
     CONF_NAME,
+    CONF_PV_ENTITIES,
     CONF_SOC_ENTITY,
     CONF_SOC_THRESHOLD,
     DATA_AVERAGER,
@@ -61,6 +62,7 @@ async def async_setup_entry(
             PVPowerAverageSensor(coordinator, entry, averager),                  # disabled
             InverterPowerAverageSensor(coordinator, entry, averager),            # disabled
             PVAvailablePowerSensor(coordinator, entry, averager, spline, trim),  # enabled
+            ActualSolarSensor(coordinator, entry, spline),                       # enabled
         ]
     )
 
@@ -310,6 +312,65 @@ class PVAvailablePowerSensor(_BaseSolarSensor):
             "soc": soc,
             "mode": "forecast (SOC high)" if using_forecast else "live average",
         }
+
+
+# ---------------------------------------------------------------------------
+# Actual Solar %  (actual PV / PV History × 100 — can exceed 100%)
+# ---------------------------------------------------------------------------
+class ActualSolarSensor(_BaseSolarSensor):
+    """Current PV output as a percentage of the PV History (spline) value.
+
+    Shows how much of the historical best you're harvesting right now.
+    Can exceed 100% on better-than-average days.
+    """
+
+    _attr_translation_key = "actual_solar"
+    _attr_icon = "mdi:percent-circle"
+    _attr_native_unit_of_measurement = "%"
+    _attr_device_class = None   # percentage, not power
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_suggested_display_precision = 0
+
+    def __init__(self, coordinator, entry, spline: HermiteSpline) -> None:
+        super().__init__(coordinator, entry)
+        self._spline = spline
+        self._attr_unique_id = f"{entry.entry_id}_actual_solar"
+        self._attr_name = "Actual Solar"
+
+    @property
+    def native_value(self) -> float | None:
+        now = dt_util.now()
+        history = self._spline.value_at_minute(now.hour * 60 + now.minute)
+        if history <= 0:
+            return 0.0
+
+        total_pv = _sum_pv_states(self.hass, self._entry.data.get(CONF_PV_ENTITIES, []))
+        if total_pv is None:
+            return None
+
+        return round((total_pv / history) * 100.0, 0)
+
+    @property
+    def extra_state_attributes(self):
+        now = dt_util.now()
+        history = self._spline.value_at_minute(now.hour * 60 + now.minute)
+        total_pv = _sum_pv_states(self.hass, self._entry.data.get(CONF_PV_ENTITIES, []))
+        return {
+            "actual_pv_w": round(total_pv, 0) if total_pv is not None else None,
+            "history_pv_w": round(history, 0),
+        }
+
+
+def _sum_pv_states(hass, entity_ids: list[str]) -> float | None:
+    total = 0.0
+    any_valid = False
+    for ent in entity_ids:
+        v = _read_float_state(hass, ent)
+        if v is None:
+            continue
+        total += v
+        any_valid = True
+    return total if any_valid else None
 
 
 def _read_float_state(hass, entity_id: str | None) -> float | None:

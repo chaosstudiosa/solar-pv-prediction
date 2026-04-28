@@ -66,6 +66,9 @@
       },
       "pv_available_power": {
         "name": "PV Available Power"
+      },
+      "actual_solar": {
+        "name": "Actual Solar"
       }
     },
     "number": {
