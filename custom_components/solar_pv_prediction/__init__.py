@@ -1,13 +1,23 @@
 """The Solar PV Prediction (History Based) integration."""
 from __future__ import annotations
 
+from datetime import timedelta
 import logging
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.event import async_track_time_interval
 
 from .average import PowerAverager
-from .const import DATA_AVERAGER, DATA_COORDINATOR, DATA_SPLINE, DATA_TRIM, DOMAIN, PLATFORMS
+from .const import (
+    DATA_AVERAGER,
+    DATA_COORDINATOR,
+    DATA_SPLINE,
+    DATA_TRIM,
+    DOMAIN,
+    PLATFORMS,
+    SENSOR_UPDATE_INTERVAL_SECONDS,
+)
 from .coordinator import SolarPVCoordinator
 from .spline import HermiteSpline
 from .trim import TrimManager
@@ -38,6 +48,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Start sunrise reset + per-minute auto-adjust AFTER platforms are up so
     # the Number entity has had a chance to restore its previous factor first.
     entry.async_on_unload(trim.async_start())
+
+    # Independent averager tick — runs every minute regardless of whether the
+    # PV Power Average / Inverter Power Average sensors are enabled in the
+    # entity registry. This ensures PV Available Power always has fresh data.
+    entry.async_on_unload(
+        async_track_time_interval(
+            hass,
+            lambda _now: averager.tick(),
+            timedelta(seconds=SENSOR_UPDATE_INTERVAL_SECONDS),
+        )
+    )
+
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
 
     return True

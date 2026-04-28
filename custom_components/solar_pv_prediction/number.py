@@ -140,7 +140,6 @@ class HistoryDaysNumber(RestoreNumber):
         self._value = value
         self.async_write_ha_state()
         # Trigger a coordinator refresh so the new window takes effect immediately.
-        from homeassistant.const import DOMAIN as HA_DOMAIN  # noqa: F401
         from .const import DATA_COORDINATOR
         coordinator = self.hass.data[DOMAIN][self._entry.entry_id][DATA_COORDINATOR]
         await coordinator.async_request_refresh()

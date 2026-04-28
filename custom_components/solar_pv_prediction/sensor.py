@@ -199,16 +199,11 @@ class PVTrimmedSensor(_BaseSolarSensor):
 # PV Power Average  (disabled by default — used internally by Available Power)
 # ---------------------------------------------------------------------------
 class _AverageSensorBase(_BaseSolarSensor):
-    """Base for rolling-average sensors; drives averager.tick() each minute."""
+    """Base for rolling-average sensors — display only, tick is driven by __init__.py."""
 
     def __init__(self, coordinator, entry, averager: PowerAverager) -> None:
         super().__init__(coordinator, entry)
         self._averager = averager
-
-    @callback
-    def _minute_tick(self, _now) -> None:
-        self._averager.tick()
-        self.async_write_ha_state()
 
 
 class PVPowerAverageSensor(_AverageSensorBase):
