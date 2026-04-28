@@ -57,7 +57,12 @@ class SolarPVCoordinator(DataUpdateCoordinator[dict[int, float]]):
         return float(self.entry.options.get(CONF_MAX_PV_CLAMP, DEFAULT_MAX_PV_CLAMP))
 
     async def _async_update_data(self) -> dict[int, float]:
-        """Fetch stats and build the {hour_of_day: max_watts} map."""
+        """Fetch stats and build the {hour_of_day: best_mean_watts} map.
+
+        For each hour-of-day (0..23), take the MAX of the hourly *mean* values
+        across the history window. This matches the original SQL query:
+        MAX(s.mean) grouped by hour-of-day.
+        """
         if not self.pv_entities:
             return {h: 0.0 for h in range(24)}
 
@@ -73,7 +78,7 @@ class SolarPVCoordinator(DataUpdateCoordinator[dict[int, float]]):
                 set(self.pv_entities),
                 "hour",
                 None,
-                {"max"},
+                {"mean"},
             )
         except Exception as err:  # noqa: BLE001
             raise UpdateFailed(f"Error fetching statistics: {err}") from err
@@ -92,7 +97,7 @@ class SolarPVCoordinator(DataUpdateCoordinator[dict[int, float]]):
                 ts_dt = dt_util.as_utc(ts_dt).replace(
                     minute=0, second=0, microsecond=0
                 )
-                value = row.get("max")
+                value = row.get("mean")
                 if value is None:
                     continue
                 try:
