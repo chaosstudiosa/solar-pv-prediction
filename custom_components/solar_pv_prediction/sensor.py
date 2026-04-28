@@ -114,7 +114,6 @@ class PVRawSensor(_BaseSolarSensor):
 
     _attr_translation_key = "pv_raw"
     _attr_icon = "mdi:solar-power"
-    _attr_entity_registry_enabled_default = False
 
     def __init__(self, coordinator, entry) -> None:
         super().__init__(coordinator, entry)
@@ -213,7 +212,6 @@ class PVPowerAverageSensor(_AverageSensorBase):
 
     _attr_translation_key = "pv_power_average"
     _attr_icon = "mdi:solar-power"
-    _attr_entity_registry_enabled_default = False
 
     def __init__(self, coordinator, entry, averager: PowerAverager) -> None:
         super().__init__(coordinator, entry, averager)
@@ -233,7 +231,6 @@ class InverterPowerAverageSensor(_AverageSensorBase):
 
     _attr_translation_key = "inverter_power_average"
     _attr_icon = "mdi:transmission-tower-export"
-    _attr_entity_registry_enabled_default = False
 
     def __init__(self, coordinator, entry, averager: PowerAverager) -> None:
         super().__init__(coordinator, entry, averager)

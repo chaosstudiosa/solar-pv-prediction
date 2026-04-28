@@ -27,22 +27,22 @@ CONF_MIN_PV_UPDATE = "min_pv_update"
 CONF_SUNRISE_FALLBACK = "sunrise_fallback"
 
 # --- Defaults: options -----------------------------------------------------
-DEFAULT_SHIFT_MINUTES = 0
-DEFAULT_MAX_PV_CLAMP = 10000.0  # W; 0 disables
+DEFAULT_SHIFT_MINUTES = 40          # matches original template (40 min lag)
+DEFAULT_MAX_PV_CLAMP = 10000.0      # W; 0 disables
 
 DEFAULT_TENSION = 0.5
 DEFAULT_UP_RATE = 0.7
 DEFAULT_DOWN_RATE = 0.1
 DEFAULT_SOC_DEADBAND = 2.0
-DEFAULT_LOAD_DEADBAND = 100.0    # W — inverter deadband for curtailment guard
-DEFAULT_RECOVERY_DEADBAND = 50.0 # W
-DEFAULT_SOC_THRESHOLD = 95.0     # %
-DEFAULT_MIN_PV_UPDATE = 50.0     # W
+DEFAULT_LOAD_DEADBAND = 100.0       # W — inverter deadband for curtailment guard
+DEFAULT_RECOVERY_DEADBAND = 50.0    # W
+DEFAULT_SOC_THRESHOLD = 95.0        # %
+DEFAULT_MIN_PV_UPDATE = 50.0        # W
 DEFAULT_SUNRISE_FALLBACK = 0.85
 
 # --- Number entity defaults (runtime-tunable from the dashboard) -----------
-DEFAULT_HISTORY_DAYS = 45
-HISTORY_DAYS_MIN = 15
+DEFAULT_HISTORY_DAYS = 14           # 2 weeks — good balance without cherry-picking peaks
+HISTORY_DAYS_MIN = 7
 HISTORY_DAYS_MAX = 60
 HISTORY_DAYS_STEP = 1
 
