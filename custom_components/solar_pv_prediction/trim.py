@@ -2,7 +2,7 @@
 
 Logic:
   - At sunrise: reset factor from weather condition.
-  - Every 60s (sun above horizon, spline > 0, actual PV > 300W):
+  - Every 60s (sun above horizon, spline > 0, PV sensor readable):
 
     1. VOLATILITY GUARD: compare instantaneous PV to PV Power Average.
        If they diverge by > 25%, use the average instead — this prevents
@@ -71,9 +71,6 @@ if TYPE_CHECKING:
     from .spline import HermiteSpline
 
 _LOGGER = logging.getLogger(__name__)
-
-# Minimum actual PV before auto-adjust runs (matches original automation)
-_MIN_ACTUAL_PV = 300.0
 
 # Volatility threshold: if instantaneous PV diverges more than this fraction
 # from the rolling average, use the average instead.
@@ -236,9 +233,9 @@ class TrimManager:
             self._prev_direction = None
             return
 
-        # Gate 3: actual PV > 300W.
+        # Gate 3: PV sensor must be readable (sun gates already cover time-of-day).
         instant_pv = _sum_states(self.hass, self.entry.data.get(CONF_PV_ENTITIES, []))
-        if instant_pv is None or instant_pv <= _MIN_ACTUAL_PV:
+        if instant_pv is None:
             self._prev_direction = None
             return
 
