@@ -5,7 +5,7 @@ Logic:
   - Every 60s (sun above horizon, spline > 0, actual PV > 300W):
 
     1. VOLATILITY GUARD: compare instantaneous PV to PV Power Average.
-       If they diverge by > 30%, use the average instead — this prevents
+       If they diverge by > 25%, use the average instead — this prevents
        chasing cloud spikes on partly-cloudy days.
 
     2. SOC GATE (when SOC >= threshold):
@@ -77,7 +77,7 @@ _MIN_ACTUAL_PV = 300.0
 
 # Volatility threshold: if instantaneous PV diverges more than this fraction
 # from the rolling average, use the average instead.
-_VOLATILITY_THRESHOLD = 0.30
+_VOLATILITY_THRESHOLD = 0.25
 
 # Adaptive rate: base rate and gap-tier multipliers.
 _BASE_RATE = 0.15
@@ -244,7 +244,7 @@ class TrimManager:
 
         # --- Step 1: VOLATILITY GUARD ---
         # Compare instantaneous PV to the rolling average. If they diverge
-        # by more than 30%, use the average — this prevents chasing
+        # by more than 25%, use the average — this prevents chasing
         # cloud spikes on partly-cloudy days.
         averager = self._get_averager()
         pv_avg = averager.pv_average if averager else None
