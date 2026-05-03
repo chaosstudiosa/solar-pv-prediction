@@ -11,13 +11,24 @@
           "inverter_entity": "Inverter power sensor",
           "weather_entity": "Weather entity"
         }
+      },
+      "reconfigure": {
+        "title": "Reconfigure Solar PV Prediction",
+        "description": "Update the entities used by this instance.",
+        "data": {
+          "pv_entities": "PV power sensors (one or more)",
+          "soc_entity": "Battery SOC sensor",
+          "inverter_entity": "Inverter power sensor",
+          "weather_entity": "Weather entity"
+        }
       }
     },
     "error": {
       "required": "At least one PV entity is required."
     },
     "abort": {
-      "already_configured": "This instance is already configured."
+      "already_configured": "This instance is already configured.",
+      "reconfigure_successful": "Configuration updated successfully."
     }
   },
   "options": {
@@ -80,6 +91,9 @@
       },
       "average_minutes": {
         "name": "Average Minutes"
+      },
+      "battery_threshold": {
+        "name": "Battery Threshold"
       }
     }
   }

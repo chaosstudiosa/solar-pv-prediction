@@ -90,6 +90,61 @@ class SolarPVPredictionConfigFlow(ConfigFlow, domain=DOMAIN):
             step_id="user", data_schema=_user_schema(), errors=errors
         )
 
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Allow changing the entity selectors via Settings → Configure."""
+        entry = self._get_reconfigure_entry()
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            if not user_input.get(CONF_PV_ENTITIES):
+                errors[CONF_PV_ENTITIES] = "required"
+            else:
+                self.hass.config_entries.async_update_entry(
+                    entry,
+                    data={**entry.data, **user_input},
+                )
+                await self.hass.config_entries.async_reload(entry.entry_id)
+                return self.async_abort(reason="reconfigure_successful")
+
+        current = entry.data
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    CONF_PV_ENTITIES,
+                    default=current.get(CONF_PV_ENTITIES, []),
+                ): selector.EntitySelector(
+                    selector.EntitySelectorConfig(
+                        domain="sensor", device_class="power", multiple=True
+                    )
+                ),
+                vol.Required(
+                    CONF_SOC_ENTITY,
+                    default=current.get(CONF_SOC_ENTITY, ""),
+                ): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="sensor")
+                ),
+                vol.Required(
+                    CONF_INVERTER_ENTITY,
+                    default=current.get(CONF_INVERTER_ENTITY, ""),
+                ): selector.EntitySelector(
+                    selector.EntitySelectorConfig(
+                        domain="sensor", device_class="power"
+                    )
+                ),
+                vol.Required(
+                    CONF_WEATHER_ENTITY,
+                    default=current.get(CONF_WEATHER_ENTITY, ""),
+                ): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="weather")
+                ),
+            }
+        )
+        return self.async_show_form(
+            step_id="reconfigure", data_schema=schema, errors=errors
+        )
+
     @staticmethod
     @callback
     def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
