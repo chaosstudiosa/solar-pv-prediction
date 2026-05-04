@@ -13,12 +13,17 @@ from .const import (
     AVERAGE_MINUTES_MAX,
     AVERAGE_MINUTES_MIN,
     AVERAGE_MINUTES_STEP,
+    BATTERY_THRESHOLD_MAX,
+    BATTERY_THRESHOLD_MIN,
+    BATTERY_THRESHOLD_STEP,
     CONF_NAME,
     DATA_AVERAGE_MINUTES_NUMBER,
     DATA_AVERAGER,
+    DATA_BATTERY_THRESHOLD_NUMBER,
     DATA_HISTORY_DAYS_NUMBER,
     DATA_TRIM,
     DEFAULT_AVERAGE_MINUTES,
+    DEFAULT_BATTERY_THRESHOLD,
     DEFAULT_HISTORY_DAYS,
     DOMAIN,
     HISTORY_DAYS_MAX,
@@ -38,21 +43,24 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up Trim Factor, History Days, and Average Minutes number entities."""
+    """Set up number entities: Trim Factor, History Days, Average Minutes, Battery Threshold."""
     data = hass.data[DOMAIN][entry.entry_id]
     trim: TrimManager = data[DATA_TRIM]
 
     history_number = HistoryDaysNumber(entry)
     average_number = AverageMinutesNumber(entry)
+    battery_threshold_number = BatteryThresholdNumber(entry)
 
-    # Store references so coordinator and averager can read the live values.
+    # Store references so other components can read live values.
     data[DATA_HISTORY_DAYS_NUMBER] = history_number
     data[DATA_AVERAGE_MINUTES_NUMBER] = average_number
+    data[DATA_BATTERY_THRESHOLD_NUMBER] = battery_threshold_number
 
     async_add_entities([
         TrimFactorNumber(entry, trim),
         history_number,
         average_number,
+        battery_threshold_number,
     ])
 
 
@@ -62,6 +70,9 @@ def _device_info(entry: ConfigEntry) -> DeviceInfo:
         name=entry.data.get(CONF_NAME, "Solar PV Prediction"),
         manufacturer="Solar PV Prediction",
         model="History-Based Forecast",
+        configuration_url=(
+            f"homeassistant://navigate/config/integrations/integration/{DOMAIN}"
+        ),
     )
 
 
@@ -190,3 +201,37 @@ class AverageMinutesNumber(RestoreNumber):
         self._value = value
         self.async_write_ha_state()
         self._apply_to_averager()
+
+
+class BatteryThresholdNumber(RestoreNumber):
+    """SOC threshold above which trim auto-adjust becomes active."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Battery Threshold"
+    _attr_translation_key = "battery_threshold"
+    _attr_icon = "mdi:battery-alert"
+    _attr_native_min_value = BATTERY_THRESHOLD_MIN
+    _attr_native_max_value = BATTERY_THRESHOLD_MAX
+    _attr_native_step = BATTERY_THRESHOLD_STEP
+    _attr_mode = NumberMode.SLIDER
+    _attr_native_unit_of_measurement = "%"
+
+    def __init__(self, entry: ConfigEntry) -> None:
+        self._entry = entry
+        self._value: float = float(DEFAULT_BATTERY_THRESHOLD)
+        self._attr_unique_id = f"{entry.entry_id}_battery_threshold"
+        self._attr_device_info = _device_info(entry)
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        last = await self.async_get_last_number_data()
+        if last is not None and last.native_value is not None:
+            self._value = float(last.native_value)
+
+    @property
+    def native_value(self) -> float:
+        return self._value
+
+    async def async_set_native_value(self, value: float) -> None:
+        self._value = value
+        self.async_write_ha_state()

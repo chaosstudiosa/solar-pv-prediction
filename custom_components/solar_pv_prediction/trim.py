@@ -53,6 +53,8 @@ from .const import (
     CONF_SUNRISE_FALLBACK,
     CONF_WEATHER_ENTITY,
     DATA_AVERAGER,
+    DATA_BATTERY_THRESHOLD_NUMBER,
+    DEFAULT_BATTERY_THRESHOLD,
     DEFAULT_LOAD_DEADBAND,
     DEFAULT_MIN_PV_UPDATE,
     DEFAULT_RECOVERY_DEADBAND,
@@ -142,6 +144,15 @@ class TrimManager:
         return self.hass.data.get(DOMAIN, {}).get(
             self.entry.entry_id, {}
         ).get(DATA_AVERAGER)
+
+    def _get_battery_threshold(self) -> float:
+        """Get the live battery threshold from BatteryThresholdNumber entity."""
+        entity = self.hass.data.get(DOMAIN, {}).get(
+            self.entry.entry_id, {}
+        ).get(DATA_BATTERY_THRESHOLD_NUMBER)
+        if entity is not None:
+            return float(entity.native_value)
+        return DEFAULT_BATTERY_THRESHOLD
 
     # --- State ------------------------------------------------------------
     @property
@@ -261,35 +272,40 @@ class TrimManager:
         else:
             effective_pv = instant_pv
 
-        # Read SOC and inverter/load.
+        # Read SOC and load.
         soc = _read_float(self.hass, self.entry.data.get(CONF_SOC_ENTITY))
         load = _read_float(self.hass, self.entry.data.get(CONF_INVERTER_ENTITY))
-
-        # Current trimmed PV estimate.
         trimmed_pv = spline * self._factor
+        battery_threshold = self._get_battery_threshold()
 
         # --- Step 2: SOC GATE ---
-        if soc is not None and soc >= self.soc_threshold:
-            load_exceeds = (
-                load is not None
-                and load > (effective_pv + self.load_deadband)
+        # Only adjust when battery is at or above threshold.
+        # Below threshold the battery is still charging — leave trim alone.
+        if soc is None or soc < battery_threshold:
+            _LOGGER.debug(
+                "SOC gate: soc=%s threshold=%.0f%% — skipping adjust",
+                f"{soc:.0f}%" if soc is not None else "unavailable",
+                battery_threshold,
             )
-            pv_proves_underestimate = (
-                effective_pv > (trimmed_pv + self.recovery_deadband)
+            self._prev_direction = None
+            return
+
+        # --- Step 3: DIRECTION ---
+        # UP  — actual PV exceeds prediction (under-predicting); sustained >10 s.
+        # DOWN — load exceeds actual PV and/or trimmed PV (battery full, load > gen).
+        if effective_pv > trimmed_pv:
+            target = max(TRIM_MIN, min(TRIM_MAX, effective_pv / spline))
+        elif load is not None and (load > effective_pv or load > trimmed_pv):
+            target = max(TRIM_MIN, min(TRIM_MAX, effective_pv / spline))
+        else:
+            _LOGGER.debug(
+                "No adjustment: eff_pv=%.0fW trimmed=%.0fW load=%s",
+                effective_pv, trimmed_pv,
+                f"{load:.0f}W" if load is not None else "unavailable",
             )
+            self._prev_direction = None
+            return
 
-            if not load_exceeds and not pv_proves_underestimate:
-                _LOGGER.debug(
-                    "Skipping: SOC %.0f%% >= %.0f%%, no update condition met "
-                    "(load=%.0f, eff_pv=%.0f, trimmed=%.0f)",
-                    soc, self.soc_threshold, load or 0,
-                    effective_pv, trimmed_pv,
-                )
-                self._prev_direction = None
-                return
-
-        # --- Step 3: TARGET ---
-        target = max(0.0, min(1.0, effective_pv / spline))
         delta = target - self._factor
 
         # --- Step 4: ADAPTIVE RATE ---

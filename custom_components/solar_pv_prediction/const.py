@@ -75,6 +75,12 @@ WEATHER_FACTOR_MAP: dict[str, float] = {
     "exceptional": 0.50,
 }
 
+# --- Battery threshold number entity ---------------------------------------
+BATTERY_THRESHOLD_MIN = 80.0
+BATTERY_THRESHOLD_MAX = 100.0
+BATTERY_THRESHOLD_STEP = 1.0
+DEFAULT_BATTERY_THRESHOLD = 95.0
+
 # --- hass.data keys --------------------------------------------------------
 DATA_COORDINATOR = "coordinator"
 DATA_TRIM = "trim"
@@ -82,6 +88,7 @@ DATA_SPLINE = "spline"
 DATA_AVERAGER = "averager"
 DATA_HISTORY_DAYS_NUMBER = "history_days_number"
 DATA_AVERAGE_MINUTES_NUMBER = "average_minutes_number"
+DATA_BATTERY_THRESHOLD_NUMBER = "battery_threshold_number"
 
 # --- Update intervals ------------------------------------------------------
 COORDINATOR_UPDATE_INTERVAL_HOURS = 1
