@@ -11,8 +11,7 @@
           "inverter_entity": "Inverter power sensor",
           "weather_entity": "Weather entity"
         }
-      }
-    },
+      },
       "reconfigure": {
         "title": "Reconfigure Solar PV Prediction",
         "description": "Update the entities used by this instance.",
