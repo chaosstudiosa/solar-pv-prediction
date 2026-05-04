@@ -2,8 +2,8 @@
 
 Logic:
   - At sunrise: reset factor from weather condition.
-  - Every TRIM_TICK_SECONDS (10 s) when sun is above horizon, spline > 0,
-    and PV sensor is readable:
+  - Every TRIM_TICK_SECONDS (10 s) when sun is above horizon,
+    spline >= TRIM_MIN_SPLINE, and PV sensor is readable:
 
     1. VOLATILITY GUARD: compare instantaneous PV to PV Power Average.
        If they diverge by > 25%, use the average instead — prevents
@@ -12,9 +12,9 @@ Logic:
     2. SOC GATE: if SOC is below battery threshold, do nothing.
        Trim only adjusts when the battery is at or above threshold.
 
-    3. DIRECTION:
+    3. DIRECTION (symmetric):
          UP   — effective_pv > pv_trimmed (we're under-predicting)
-         DOWN — load > effective_pv OR load > pv_trimmed (over-predicting)
+         DOWN — effective_pv < pv_trimmed (we're over-predicting)
 
     4. SUSTAIN GATE: direction must match the previous tick for
        TRIM_SUSTAIN_TICKS (1 tick = 10 s) before counting toward an apply.
@@ -68,6 +68,10 @@ if TYPE_CHECKING:
     from .spline import HermiteSpline
 
 _LOGGER = logging.getLogger(__name__)
+
+# Minimum spline value to allow auto-adjust. Below this the curve is near
+# sunrise/sunset and dividing by a tiny spline would drive trim to the floor.
+_TRIM_MIN_SPLINE = 200.0
 
 # Volatility threshold: if instantaneous PV diverges more than this fraction
 # from the rolling average, use the average instead.
@@ -217,11 +221,13 @@ class TrimManager:
             self._reset_tick_state()
             return
 
-        # Gate 2: spline > 0.
+        # Gate 2: spline must be meaningfully above zero.
+        # A tiny spline near sunrise/sunset would make effective_pv/spline
+        # blow up or collapse, driving the trim factor to the floor.
         local_now = dt_util.as_local(now) if now.tzinfo else dt_util.now()
         minute_of_day = local_now.hour * 60 + local_now.minute
         spline = self.spline.value_at_minute(minute_of_day)
-        if spline <= 0:
+        if spline < _TRIM_MIN_SPLINE:
             self._reset_tick_state()
             return
 
@@ -264,18 +270,16 @@ class TrimManager:
             return
 
         # --- Step 3: DIRECTION ---
-        load = _read_float(self.hass, self.entry.data.get(CONF_INVERTER_ENTITY))
         trimmed_pv = spline * self._factor
 
         if effective_pv > trimmed_pv:
             direction = "up"
-        elif load is not None and (load > effective_pv or load > trimmed_pv):
+        elif effective_pv < trimmed_pv:
             direction = "down"
         else:
             _LOGGER.debug(
-                "No adjustment needed: eff_pv=%.0fW trimmed=%.0fW load=%s",
+                "No adjustment needed: eff_pv=%.0fW == trimmed=%.0fW",
                 effective_pv, trimmed_pv,
-                f"{load:.0f}W" if load is not None else "unavailable",
             )
             self._reset_tick_state()
             return
@@ -319,9 +323,9 @@ class TrimManager:
 
         _LOGGER.debug(
             "Trim adjust: eff_pv=%.0fW spline=%.0fW trimmed=%.0fW "
-            "target=%.3f gap=%.0f%% rate=%.3f dir=%s -> %.3f",
+            "target=%.3f gap=%.0f%% rate=%.3f dir=%s factor %.3f -> %.3f",
             effective_pv, spline, trimmed_pv,
-            target, gap_fraction * 100, rate, direction, new_factor,
+            target, gap_fraction * 100, rate, direction, self._factor, new_factor,
         )
         self.set_factor(new_factor, source="auto")
 

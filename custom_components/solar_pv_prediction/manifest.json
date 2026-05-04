@@ -1,7 +1,7 @@
 {
   "domain": "solar_pv_prediction",
   "name": "Solar PV Prediction (History Based)",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "documentation": "https://github.com/your-user/solar-pv-prediction",
   "issue_tracker": "https://github.com/your-user/solar-pv-prediction/issues",
   "codeowners": ["@your-user"],
