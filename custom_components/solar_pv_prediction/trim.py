@@ -1,36 +1,35 @@
-"""Trim factor manager: sunrise reset + adaptive auto-adjust.
+"""Trim factor manager: sunrise reset + adaptive per-minute auto-adjust.
 
 Logic:
   - At sunrise: reset factor from weather condition.
-  - Every TRIM_TICK_SECONDS (10 s) when sun is above horizon,
-    spline >= TRIM_MIN_SPLINE, and PV sensor is readable:
+  - Every 60s (sun above horizon, spline > 0, PV sensor readable):
 
     1. VOLATILITY GUARD: compare instantaneous PV to PV Power Average.
-       If they diverge by > 25%, use the average instead — prevents
+       If they diverge by > 25%, use the average instead — this prevents
        chasing cloud spikes on partly-cloudy days.
 
-    2. SOC GATE: if SOC is below battery threshold, do nothing.
-       Trim only adjusts when the battery is at or above threshold.
+    2. SOC GATE (when SOC >= threshold):
+       Only allowed to adjust if:
+         (a) load > (effective_pv + load_deadband), OR
+         (b) effective_pv > (trimmed_pv + recovery_deadband)
 
-    3. DIRECTION (symmetric):
-         UP   — effective_pv > pv_trimmed (we're under-predicting)
-         DOWN — effective_pv < pv_trimmed (we're over-predicting)
+    3. TARGET: target_factor = clamp(effective_pv / spline, 0..1)
 
-    4. SUSTAIN GATE: direction must match the previous tick for
-       TRIM_SUSTAIN_TICKS (1 tick = 10 s) before counting toward an apply.
+    4. ADAPTIVE RATE: rate scales with the gap size (same up and down):
+         gap < 10%  → base_rate (0.15)
+         gap 10-30% → 2× base_rate
+         gap > 30%  → 3× base_rate
+       Capped at 1.0.
 
-    5. APPLY GATE: every TRIM_APPLY_TICKS (6 ticks = 60 s) of sustained
-       direction the adjustment is committed:
-         new_factor = current + (target − current) × adaptive_rate
+    5. SUSTAIN GATE: the adjustment direction (up or down) must be the same
+       for 2 consecutive ticks (60s each = 120s total) before applying.
+       This filters out transient spikes and dips.
 
-    6. ADAPTIVE RATE: scales with the gap between target and current:
-         gap < 10%  → 0.15
-         gap 10-30% → 0.30  (2× base)
-         gap > 30%  → 0.45  (3× base)
+    6. APPLY: new_factor = current + (target - current) × adaptive_rate
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime
 import logging
 from typing import TYPE_CHECKING, Callable
 
@@ -45,20 +44,24 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     CONF_INVERTER_ENTITY,
+    CONF_LOAD_DEADBAND,
+    CONF_MIN_PV_UPDATE,
     CONF_PV_ENTITIES,
+    CONF_RECOVERY_DEADBAND,
     CONF_SOC_ENTITY,
+    CONF_SOC_THRESHOLD,
     CONF_SUNRISE_FALLBACK,
     CONF_WEATHER_ENTITY,
     DATA_AVERAGER,
-    DATA_BATTERY_THRESHOLD_NUMBER,
-    DEFAULT_BATTERY_THRESHOLD,
+    DEFAULT_LOAD_DEADBAND,
+    DEFAULT_MIN_PV_UPDATE,
+    DEFAULT_RECOVERY_DEADBAND,
+    DEFAULT_SOC_THRESHOLD,
     DEFAULT_SUNRISE_FALLBACK,
     DOMAIN,
-    TRIM_APPLY_TICKS,
     TRIM_MAX,
     TRIM_MIN,
-    TRIM_SUSTAIN_TICKS,
-    TRIM_TICK_SECONDS,
+    TRIM_UPDATE_INTERVAL_SECONDS,
     WEATHER_FACTOR_MAP,
 )
 
@@ -69,10 +72,6 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
-# Minimum spline value to allow auto-adjust. Below this the curve is near
-# sunrise/sunset and dividing by a tiny spline would drive trim to the floor.
-_TRIM_MIN_SPLINE = 200.0
-
 # Volatility threshold: if instantaneous PV diverges more than this fraction
 # from the rolling average, use the average instead.
 _VOLATILITY_THRESHOLD = 0.25
@@ -80,9 +79,9 @@ _VOLATILITY_THRESHOLD = 0.25
 # Adaptive rate: base rate and gap-tier multipliers.
 _BASE_RATE = 0.15
 _RATE_TIERS = [
-    (0.30, 3.0),   # gap > 30% → 3× base = 0.45
-    (0.10, 2.0),   # gap > 10% → 2× base = 0.30
-    (0.00, 1.0),   # gap ≤ 10% → 1× base = 0.15
+    (0.30, 3.0),   # gap > 30% → 3× base
+    (0.10, 2.0),   # gap > 10% → 2× base
+    (0.00, 1.0),   # gap ≤ 10% → 1× base
 ]
 
 
@@ -111,36 +110,40 @@ class TrimManager:
         self.spline = spline
         self._factor: float = 1.0
         self._listeners: list[Callable[[float], None]] = []
-        # Tick state for sustain + apply gating.
+        # Sustain tracking: direction from previous tick ("up", "down", or None).
         self._prev_direction: str | None = None
-        self._sustain_count: int = 0
-        self._apply_ticks: int = 0
 
-    # --- Options proxy -------------------------------------------------------
+    # --- Options proxies --------------------------------------------------
     def _opt(self, key: str, default: float) -> float:
         return float(self.entry.options.get(key, default))
+
+    @property
+    def load_deadband(self) -> float:
+        return self._opt(CONF_LOAD_DEADBAND, DEFAULT_LOAD_DEADBAND)
+
+    @property
+    def recovery_deadband(self) -> float:
+        return self._opt(CONF_RECOVERY_DEADBAND, DEFAULT_RECOVERY_DEADBAND)
+
+    @property
+    def soc_threshold(self) -> float:
+        return self._opt(CONF_SOC_THRESHOLD, DEFAULT_SOC_THRESHOLD)
+
+    @property
+    def min_pv_update(self) -> float:
+        return self._opt(CONF_MIN_PV_UPDATE, DEFAULT_MIN_PV_UPDATE)
 
     @property
     def sunrise_fallback(self) -> float:
         return self._opt(CONF_SUNRISE_FALLBACK, DEFAULT_SUNRISE_FALLBACK)
 
-    # --- hass.data helpers ---------------------------------------------------
     def _get_averager(self):
         """Get the PowerAverager from hass.data."""
         return self.hass.data.get(DOMAIN, {}).get(
             self.entry.entry_id, {}
         ).get(DATA_AVERAGER)
 
-    def _get_battery_threshold(self) -> float:
-        """Get the live battery threshold from BatteryThresholdNumber."""
-        entity = self.hass.data.get(DOMAIN, {}).get(
-            self.entry.entry_id, {}
-        ).get(DATA_BATTERY_THRESHOLD_NUMBER)
-        if entity is not None:
-            return float(entity.native_value)
-        return DEFAULT_BATTERY_THRESHOLD
-
-    # --- State ---------------------------------------------------------------
+    # --- State ------------------------------------------------------------
     @property
     def factor(self) -> float:
         return self._factor
@@ -175,12 +178,13 @@ class TrimManager:
 
         return _unregister
 
-    # --- Lifecycle -----------------------------------------------------------
+    # --- Lifecycle --------------------------------------------------------
     def async_start(self) -> CALLBACK_TYPE:
+        from datetime import timedelta
         cancel_adjust = async_track_time_interval(
             self.hass,
             self._async_adjust_tick,
-            timedelta(seconds=TRIM_TICK_SECONDS),
+            timedelta(seconds=TRIM_UPDATE_INTERVAL_SECONDS),
         )
         cancel_sunrise = async_track_sunrise(self.hass, self._async_sunrise_reset)
 
@@ -191,7 +195,7 @@ class TrimManager:
 
         return _cancel
 
-    # --- Sunrise reset -------------------------------------------------------
+    # --- Sunrise reset ----------------------------------------------------
     @callback
     def _async_sunrise_reset(self) -> None:
         weather_id = self.entry.data.get(CONF_WEATHER_ENTITY)
@@ -207,37 +211,38 @@ class TrimManager:
                         "Unknown weather '%s' at sunrise; fallback %.2f",
                         state.state, new_factor,
                     )
-        self._reset_tick_state()
+        self._prev_direction = None
         self.set_factor(new_factor, source="sunrise")
 
-    # --- Per-tick auto-adjust ------------------------------------------------
+    # --- Per-minute auto-adjust ------------------------------------------
     @callback
     def _async_adjust_tick(self, now: datetime) -> None:
-        """Adaptive trim adjustment — runs every TRIM_TICK_SECONDS seconds."""
+        """Adaptive trim adjustment with volatility guard and sustain gate."""
 
         # Gate 1: sun must be above horizon.
         sun_state = self.hass.states.get("sun.sun")
         if sun_state is None or sun_state.state != "above_horizon":
-            self._reset_tick_state()
+            self._prev_direction = None
             return
 
-        # Gate 2: spline must be meaningfully above zero.
-        # A tiny spline near sunrise/sunset would make effective_pv/spline
-        # blow up or collapse, driving the trim factor to the floor.
+        # Gate 2: spline > 0.
         local_now = dt_util.as_local(now) if now.tzinfo else dt_util.now()
         minute_of_day = local_now.hour * 60 + local_now.minute
         spline = self.spline.value_at_minute(minute_of_day)
-        if spline < _TRIM_MIN_SPLINE:
-            self._reset_tick_state()
+        if spline <= 0:
+            self._prev_direction = None
             return
 
-        # Gate 3: PV sensor must be readable.
+        # Gate 3: PV sensor must be readable (sun gates already cover time-of-day).
         instant_pv = _sum_states(self.hass, self.entry.data.get(CONF_PV_ENTITIES, []))
         if instant_pv is None:
-            self._reset_tick_state()
+            self._prev_direction = None
             return
 
         # --- Step 1: VOLATILITY GUARD ---
+        # Compare instantaneous PV to the rolling average. If they diverge
+        # by more than 25%, use the average — this prevents chasing
+        # cloud spikes on partly-cloudy days.
         averager = self._get_averager()
         pv_avg = averager.pv_average if averager else None
 
@@ -256,87 +261,73 @@ class TrimManager:
         else:
             effective_pv = instant_pv
 
-        # --- Step 2: SOC GATE ---
+        # Read SOC and inverter/load.
         soc = _read_float(self.hass, self.entry.data.get(CONF_SOC_ENTITY))
-        battery_threshold = self._get_battery_threshold()
+        load = _read_float(self.hass, self.entry.data.get(CONF_INVERTER_ENTITY))
 
-        if soc is None or soc < battery_threshold:
-            _LOGGER.debug(
-                "SOC gate: soc=%s threshold=%.0f%% — skipping adjust",
-                f"{soc:.0f}%" if soc is not None else "unavailable",
-                battery_threshold,
-            )
-            self._reset_tick_state()
-            return
-
-        # --- Step 3: DIRECTION ---
+        # Current trimmed PV estimate.
         trimmed_pv = spline * self._factor
 
-        if effective_pv > trimmed_pv:
-            direction = "up"
-        elif effective_pv < trimmed_pv:
-            direction = "down"
-        else:
-            _LOGGER.debug(
-                "No adjustment needed: eff_pv=%.0fW == trimmed=%.0fW",
-                effective_pv, trimmed_pv,
+        # --- Step 2: SOC GATE ---
+        if soc is not None and soc >= self.soc_threshold:
+            load_exceeds = (
+                load is not None
+                and load > (effective_pv + self.load_deadband)
             )
-            self._reset_tick_state()
-            return
-
-        # --- Step 4: SUSTAIN GATE ---
-        if direction != self._prev_direction:
-            _LOGGER.debug(
-                "Sustain: direction changed to '%s' — waiting for confirmation",
-                direction,
+            pv_proves_underestimate = (
+                effective_pv > (trimmed_pv + self.recovery_deadband)
             )
-            self._prev_direction = direction
-            self._sustain_count = 1
-            self._apply_ticks = 0
-            return
 
-        self._sustain_count += 1
-        if self._sustain_count <= TRIM_SUSTAIN_TICKS:
-            _LOGGER.debug(
-                "Sustain: %d/%d ticks (%s) — not yet confirmed",
-                self._sustain_count, TRIM_SUSTAIN_TICKS, direction,
-            )
-            return
+            if not load_exceeds and not pv_proves_underestimate:
+                _LOGGER.debug(
+                    "Skipping: SOC %.0f%% >= %.0f%%, no update condition met "
+                    "(load=%.0f, eff_pv=%.0f, trimmed=%.0f)",
+                    soc, self.soc_threshold, load or 0,
+                    effective_pv, trimmed_pv,
+                )
+                self._prev_direction = None
+                return
 
-        # --- Step 5: APPLY GATE ---
-        self._apply_ticks += 1
-        if self._apply_ticks < TRIM_APPLY_TICKS:
-            _LOGGER.debug(
-                "Apply gate: tick %d/%d (%s)",
-                self._apply_ticks, TRIM_APPLY_TICKS, direction,
-            )
-            return
-
-        self._apply_ticks = 0  # reset for next apply window
-
-        # --- Step 6: APPLY ---
-        target = max(TRIM_MIN, min(TRIM_MAX, effective_pv / spline))
+        # --- Step 3: TARGET ---
+        target = max(0.0, min(1.0, effective_pv / spline))
         delta = target - self._factor
+
+        # --- Step 4: ADAPTIVE RATE ---
         gap_fraction = abs(delta) / self._factor if self._factor > 0 else abs(delta)
         rate = _adaptive_rate(gap_fraction)
-        new_factor = max(TRIM_MIN, min(TRIM_MAX, self._factor + (delta * rate)))
+
+        # --- Step 5: SUSTAIN GATE ---
+        # The adjustment direction must be the same for 2 consecutive ticks
+        # (60s + 60s = ~120s) before we apply it.
+        current_direction = "up" if delta > 0 else "down"
+
+        if self._prev_direction != current_direction:
+            # Direction changed or first tick — record and wait.
+            self._prev_direction = current_direction
+            _LOGGER.debug(
+                "Sustain: direction=%s, waiting for confirmation next tick "
+                "(target=%.3f, current=%.3f, gap=%.0f%%)",
+                current_direction, target, self._factor, gap_fraction * 100,
+            )
+            return
+
+        # Direction confirmed for 2 consecutive ticks — apply.
+        self._prev_direction = current_direction  # keep tracking
+
+        # --- Step 6: APPLY ---
+        new_factor = self._factor + (delta * rate)
+        new_factor = max(0.0, min(1.0, new_factor))
 
         _LOGGER.debug(
-            "Trim adjust: eff_pv=%.0fW spline=%.0fW trimmed=%.0fW "
-            "target=%.3f gap=%.0f%% rate=%.3f dir=%s factor %.3f -> %.3f",
-            effective_pv, spline, trimmed_pv,
-            target, gap_fraction * 100, rate, direction, self._factor, new_factor,
+            "Trim adjust: eff_pv=%.0fW spline=%.0fW target=%.3f "
+            "gap=%.0f%% rate=%.3f direction=%s -> %.3f",
+            effective_pv, spline, target, gap_fraction * 100,
+            rate, current_direction, new_factor,
         )
         self.set_factor(new_factor, source="auto")
 
-    def _reset_tick_state(self) -> None:
-        """Reset sustain and apply counters."""
-        self._prev_direction = None
-        self._sustain_count = 0
-        self._apply_ticks = 0
 
-
-# --- Helpers -----------------------------------------------------------------
+# --- Helpers --------------------------------------------------------------
 def _read_float(hass: HomeAssistant, entity_id: str | None) -> float | None:
     if not entity_id:
         return None

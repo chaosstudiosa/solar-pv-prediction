@@ -51,11 +51,6 @@ AVERAGE_MINUTES_MIN = 3
 AVERAGE_MINUTES_MAX = 10
 AVERAGE_MINUTES_STEP = 1
 
-DEFAULT_BATTERY_THRESHOLD = 95.0    # % SOC above which trim auto-adjust is active
-BATTERY_THRESHOLD_MIN = 80.0
-BATTERY_THRESHOLD_MAX = 100.0
-BATTERY_THRESHOLD_STEP = 1.0
-
 # --- Trim factor bounds ----------------------------------------------------
 TRIM_MIN = 0.05
 TRIM_MAX = 1.50
@@ -87,11 +82,8 @@ DATA_SPLINE = "spline"
 DATA_AVERAGER = "averager"
 DATA_HISTORY_DAYS_NUMBER = "history_days_number"
 DATA_AVERAGE_MINUTES_NUMBER = "average_minutes_number"
-DATA_BATTERY_THRESHOLD_NUMBER = "battery_threshold_number"
 
 # --- Update intervals ------------------------------------------------------
 COORDINATOR_UPDATE_INTERVAL_HOURS = 1
-TRIM_TICK_SECONDS = 10              # how often the trim tick fires
-TRIM_APPLY_TICKS = 6               # ticks between actual factor updates (6 × 10s = 60s)
-TRIM_SUSTAIN_TICKS = 1             # consecutive same-direction ticks needed before counting
+TRIM_UPDATE_INTERVAL_SECONDS = 60
 SENSOR_UPDATE_INTERVAL_SECONDS = 60
