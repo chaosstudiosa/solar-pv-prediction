@@ -8,22 +8,25 @@ Logic:
        If they diverge by > 25%, use the average instead — this prevents
        chasing cloud spikes on partly-cloudy days.
 
-    2. SOC GATE (when SOC >= threshold):
-       Only allowed to adjust if:
-         (a) load > (effective_pv + load_deadband), OR
-         (b) effective_pv > (trimmed_pv + recovery_deadband)
+    2. DIRECTION — depends on battery SOC vs threshold:
 
-    3. TARGET: target_factor = clamp(effective_pv / spline, 0..1)
+       SOC < threshold (battery charging):
+         UP   — effective_pv > trimmed_pv  (under-predicting, track reality up)
+         DOWN — effective_pv < trimmed_pv  (over-predicting, track reality down)
 
-    4. ADAPTIVE RATE: rate scales with the gap size (same up and down):
-         gap < 10%  → base_rate (0.15)
-         gap 10-30% → 2× base_rate
-         gap > 30%  → 3× base_rate
-       Capped at 1.0.
+       SOC >= threshold (battery full):
+         UP   — effective_pv > trimmed_pv  (same)
+         DOWN — load > effective_pv OR load > trimmed_pv
+                (stricter: only trim down if load actually exceeds generation)
 
-    5. SUSTAIN GATE: the adjustment direction (up or down) must be the same
-       for 2 consecutive ticks (60s each = 120s total) before applying.
-       This filters out transient spikes and dips.
+    3. TARGET: target_factor = clamp(effective_pv / spline, TRIM_MIN..TRIM_MAX)
+
+    4. ADAPTIVE RATE: rate scales with the gap size:
+         gap < 10%  → 0.15
+         gap 10-30% → 0.30  (2× base)
+         gap > 30%  → 0.45  (3× base)
+
+    5. SUSTAIN GATE: direction must match previous tick (60 s) before applying.
 
     6. APPLY: new_factor = current + (target - current) × adaptive_rate
 """
@@ -277,31 +280,28 @@ class TrimManager:
         load = _read_float(self.hass, self.entry.data.get(CONF_INVERTER_ENTITY))
         trimmed_pv = spline * self._factor
         battery_threshold = self._get_battery_threshold()
+        battery_full = soc is not None and soc >= battery_threshold
 
-        # --- Step 2: SOC GATE ---
-        # Only adjust when battery is at or above threshold.
-        # Below threshold the battery is still charging — leave trim alone.
-        if soc is None or soc < battery_threshold:
-            _LOGGER.debug(
-                "SOC gate: soc=%s threshold=%.0f%% — skipping adjust",
-                f"{soc:.0f}%" if soc is not None else "unavailable",
-                battery_threshold,
-            )
-            self._prev_direction = None
-            return
-
-        # --- Step 3: DIRECTION ---
-        # UP  — actual PV exceeds prediction (under-predicting); sustained >10 s.
-        # DOWN — load exceeds actual PV and/or trimmed PV (battery full, load > gen).
+        # --- Step 2: DIRECTION ---
+        # While charging (SOC < threshold): track actual PV symmetrically.
+        # While full  (SOC >= threshold): stricter DOWN — only if load exceeds PV.
         if effective_pv > trimmed_pv:
+            # Always allowed to adjust UP.
             target = max(TRIM_MIN, min(TRIM_MAX, effective_pv / spline))
-        elif load is not None and (load > effective_pv or load > trimmed_pv):
+        elif battery_full and load is not None and (
+            load > effective_pv or load > trimmed_pv
+        ):
+            # Battery full: adjust DOWN only when load exceeds generation.
+            target = max(TRIM_MIN, min(TRIM_MAX, effective_pv / spline))
+        elif not battery_full and effective_pv < trimmed_pv:
+            # Battery charging: adjust DOWN freely to track actual PV.
             target = max(TRIM_MIN, min(TRIM_MAX, effective_pv / spline))
         else:
             _LOGGER.debug(
-                "No adjustment: eff_pv=%.0fW trimmed=%.0fW load=%s",
+                "No adjustment: eff_pv=%.0fW trimmed=%.0fW load=%s soc=%s",
                 effective_pv, trimmed_pv,
                 f"{load:.0f}W" if load is not None else "unavailable",
+                f"{soc:.0f}%" if soc is not None else "unavailable",
             )
             self._prev_direction = None
             return
