@@ -89,10 +89,10 @@ class HermiteSpline:
         p1  = self._point(points, hour_idx + 1)
         p2  = self._point(points, hour_idx + 2)
 
-        # Tensioned Hermite tangents (matches original template)
+        # Tensioned Catmull-Rom tangents: (1-tension) * (next - prev) / 2
         s = 1.0 - self.tension
-        m0 = s * (p1 - p_2) / 2.0   # tangent at p0 using prev2 and next1
-        m1 = s * (p2 - p_1) / 2.0   # tangent at p1 using prev1 and next2
+        m0 = s * (p1 - p_1) / 2.0   # tangent at p0 using prev1 and next1
+        m1 = s * (p2 - p0) / 2.0    # tangent at p1 using p0 and next2
 
         t2 = t * t
         t3 = t2 * t
