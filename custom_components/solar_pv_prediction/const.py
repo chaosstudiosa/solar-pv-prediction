@@ -52,7 +52,7 @@ AVERAGE_MINUTES_MAX = 10
 AVERAGE_MINUTES_STEP = 1
 
 # --- Trim factor bounds ----------------------------------------------------
-TRIM_MIN = 0.05
+TRIM_MIN = 0.0
 TRIM_MAX = 1.50
 TRIM_STEP = 0.001
 
@@ -79,7 +79,7 @@ WEATHER_FACTOR_MAP: dict[str, float] = {
 BATTERY_THRESHOLD_MIN = 80.0
 BATTERY_THRESHOLD_MAX = 100.0
 BATTERY_THRESHOLD_STEP = 1.0
-DEFAULT_BATTERY_THRESHOLD = 95.0
+DEFAULT_BATTERY_THRESHOLD = 90.0
 
 # --- hass.data keys --------------------------------------------------------
 DATA_COORDINATOR = "coordinator"

@@ -1,38 +1,40 @@
-"""Trim factor manager: sunrise reset + adaptive per-minute auto-adjust.
+"""Trim factor manager.
 
 Logic:
-  - At sunrise: reset factor from weather condition.
-  - Every 60s (sun above horizon, spline > 0, PV sensor readable):
+  - 1 hour before sunrise: reset trim factor to 0.
+  - Every 60 s when actual PV > 10 W and spline > 0:
 
-    1. VOLATILITY GUARD: compare instantaneous PV to PV Power Average.
-       If they diverge by > 25%, use the average instead — this prevents
-       chasing cloud spikes on partly-cloudy days.
+    1. VOLATILITY GUARD: if instantaneous PV diverges > 25 % from the
+       rolling average, use the average instead — prevents chasing
+       cloud spikes on partly-cloudy days.
 
-    2. DIRECTION — depends on battery SOC vs threshold:
+    2. DIRECTION — depends on battery SOC vs Battery Threshold:
 
        SOC < threshold (battery charging):
-         UP   — effective_pv > trimmed_pv  (under-predicting, track reality up)
-         DOWN — effective_pv < trimmed_pv  (over-predicting, track reality down)
+         Adjust freely UP or DOWN toward target (tracks actual PV).
 
        SOC >= threshold (battery full):
-         UP   — effective_pv > trimmed_pv  (same)
-         DOWN — load > effective_pv OR load > trimmed_pv
-                (stricter: only trim down if load actually exceeds generation)
+         Adjust only when:
+           effective_pv > trimmed_pv          → UP
+           OR load > effective_pv             → UP or DOWN
+           OR load > trimmed_pv               → UP or DOWN
+         No adjustment if none of those conditions are met.
 
-    3. TARGET: target_factor = clamp(effective_pv / spline, TRIM_MIN..TRIM_MAX)
+    3. TARGET: target_factor = clamp(effective_pv / spline, 0..TRIM_MAX)
 
-    4. ADAPTIVE RATE: rate scales with the gap size:
-         gap < 10%  → 0.15
-         gap 10-30% → 0.30  (2× base)
-         gap > 30%  → 0.45  (3× base)
+    4. ADAPTIVE RATE: scales with the gap between target and current:
+         gap < 10 %  → 0.15
+         gap 10-30 % → 0.30  (2 × base)
+         gap > 30 %  → 0.45  (3 × base)
 
-    5. SUSTAIN GATE: direction must match previous tick (60 s) before applying.
+    5. SUSTAIN GATE: direction must match the previous tick (60 s)
+       before any change is applied — filters single-tick noise.
 
-    6. APPLY: new_factor = current + (target - current) × adaptive_rate
+    6. APPLY: new_factor = clamp(current + delta × rate, 0..TRIM_MAX)
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 from typing import TYPE_CHECKING, Callable
 
@@ -47,51 +49,41 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     CONF_INVERTER_ENTITY,
-    CONF_LOAD_DEADBAND,
-    CONF_MIN_PV_UPDATE,
     CONF_PV_ENTITIES,
-    CONF_RECOVERY_DEADBAND,
     CONF_SOC_ENTITY,
-    CONF_SOC_THRESHOLD,
-    CONF_SUNRISE_FALLBACK,
-    CONF_WEATHER_ENTITY,
     DATA_AVERAGER,
     DATA_BATTERY_THRESHOLD_NUMBER,
     DEFAULT_BATTERY_THRESHOLD,
-    DEFAULT_LOAD_DEADBAND,
-    DEFAULT_MIN_PV_UPDATE,
-    DEFAULT_RECOVERY_DEADBAND,
-    DEFAULT_SOC_THRESHOLD,
-    DEFAULT_SUNRISE_FALLBACK,
     DOMAIN,
     TRIM_MAX,
     TRIM_MIN,
     TRIM_UPDATE_INTERVAL_SECONDS,
-    WEATHER_FACTOR_MAP,
 )
 
 if TYPE_CHECKING:
-    from .average import PowerAverager
     from .coordinator import SolarPVCoordinator
     from .spline import HermiteSpline
 
 _LOGGER = logging.getLogger(__name__)
 
-# Volatility threshold: if instantaneous PV diverges more than this fraction
-# from the rolling average, use the average instead.
+# Gate: only run the adjustment loop when actual PV exceeds this value.
+# Prevents chasing standby draw or moonlight at night.
+_MIN_PV_WATTS = 10.0
+
+# Volatility guard threshold (fraction of rolling average).
 _VOLATILITY_THRESHOLD = 0.25
 
-# Adaptive rate: base rate and gap-tier multipliers.
+# Adaptive rate tiers.
 _BASE_RATE = 0.15
 _RATE_TIERS = [
-    (0.30, 3.0),   # gap > 30% → 3× base
-    (0.10, 2.0),   # gap > 10% → 2× base
-    (0.00, 1.0),   # gap ≤ 10% → 1× base
+    (0.30, 3.0),   # gap > 30 % → 0.45
+    (0.10, 2.0),   # gap > 10 % → 0.30
+    (0.00, 1.0),   # gap ≤ 10 % → 0.15
 ]
 
 
 def _adaptive_rate(gap_fraction: float) -> float:
-    """Return the rate multiplied by a tier factor based on how big the gap is."""
+    """Return the adaptive rate for a given gap fraction."""
     frac = abs(gap_fraction)
     for threshold, multiplier in _RATE_TIERS:
         if frac > threshold:
@@ -100,7 +92,7 @@ def _adaptive_rate(gap_fraction: float) -> float:
 
 
 class TrimManager:
-    """Holds the trim factor state and the sunrise/auto-adjust loops."""
+    """Holds the trim factor state and the pre-dawn reset / auto-adjust loops."""
 
     def __init__(
         self,
@@ -115,41 +107,15 @@ class TrimManager:
         self.spline = spline
         self._factor: float = 1.0
         self._listeners: list[Callable[[float], None]] = []
-        # Sustain tracking: direction from previous tick ("up", "down", or None).
         self._prev_direction: str | None = None
 
-    # --- Options proxies --------------------------------------------------
-    def _opt(self, key: str, default: float) -> float:
-        return float(self.entry.options.get(key, default))
-
-    @property
-    def load_deadband(self) -> float:
-        return self._opt(CONF_LOAD_DEADBAND, DEFAULT_LOAD_DEADBAND)
-
-    @property
-    def recovery_deadband(self) -> float:
-        return self._opt(CONF_RECOVERY_DEADBAND, DEFAULT_RECOVERY_DEADBAND)
-
-    @property
-    def soc_threshold(self) -> float:
-        return self._opt(CONF_SOC_THRESHOLD, DEFAULT_SOC_THRESHOLD)
-
-    @property
-    def min_pv_update(self) -> float:
-        return self._opt(CONF_MIN_PV_UPDATE, DEFAULT_MIN_PV_UPDATE)
-
-    @property
-    def sunrise_fallback(self) -> float:
-        return self._opt(CONF_SUNRISE_FALLBACK, DEFAULT_SUNRISE_FALLBACK)
-
+    # --- hass.data helpers ------------------------------------------------
     def _get_averager(self):
-        """Get the PowerAverager from hass.data."""
         return self.hass.data.get(DOMAIN, {}).get(
             self.entry.entry_id, {}
         ).get(DATA_AVERAGER)
 
     def _get_battery_threshold(self) -> float:
-        """Get the live battery threshold from BatteryThresholdNumber entity."""
         entity = self.hass.data.get(DOMAIN, {}).get(
             self.entry.entry_id, {}
         ).get(DATA_BATTERY_THRESHOLD_NUMBER)
@@ -194,52 +160,50 @@ class TrimManager:
 
     # --- Lifecycle --------------------------------------------------------
     def async_start(self) -> CALLBACK_TYPE:
-        from datetime import timedelta
         cancel_adjust = async_track_time_interval(
             self.hass,
             self._async_adjust_tick,
             timedelta(seconds=TRIM_UPDATE_INTERVAL_SECONDS),
         )
-        cancel_sunrise = async_track_sunrise(self.hass, self._async_sunrise_reset)
+        # Reset to 0 one hour before sunrise each day so the factor
+        # ramps up naturally from zero as the sun rises.
+        cancel_pre_dawn = async_track_sunrise(
+            self.hass,
+            self._async_pre_dawn_reset,
+            offset=timedelta(hours=-1),
+        )
 
         @callback
         def _cancel() -> None:
             cancel_adjust()
-            cancel_sunrise()
+            cancel_pre_dawn()
 
         return _cancel
 
-    # --- Sunrise reset ----------------------------------------------------
+    # --- Pre-dawn reset ---------------------------------------------------
     @callback
-    def _async_sunrise_reset(self) -> None:
-        weather_id = self.entry.data.get(CONF_WEATHER_ENTITY)
-        new_factor = self.sunrise_fallback
-        if weather_id:
-            state = self.hass.states.get(weather_id)
-            if state and state.state not in (None, STATE_UNKNOWN, STATE_UNAVAILABLE):
-                mapped = WEATHER_FACTOR_MAP.get(state.state)
-                if mapped is not None:
-                    new_factor = mapped
-                else:
-                    _LOGGER.debug(
-                        "Unknown weather '%s' at sunrise; fallback %.2f",
-                        state.state, new_factor,
-                    )
+    def _async_pre_dawn_reset(self) -> None:
+        """Set trim factor to 0 one hour before sunrise."""
         self._prev_direction = None
-        self.set_factor(new_factor, source="sunrise")
+        self.set_factor(0.0, source="pre-dawn")
+        _LOGGER.debug("Pre-dawn reset: trim factor set to 0")
 
-    # --- Per-minute auto-adjust ------------------------------------------
+    # --- Per-minute auto-adjust -------------------------------------------
     @callback
     def _async_adjust_tick(self, now: datetime) -> None:
-        """Adaptive trim adjustment with volatility guard and sustain gate."""
+        """Adaptive trim adjustment — fires every TRIM_UPDATE_INTERVAL_SECONDS."""
 
-        # Gate 1: sun must be above horizon.
-        sun_state = self.hass.states.get("sun.sun")
-        if sun_state is None or sun_state.state != "above_horizon":
+        # Gate 1: actual PV must exceed the minimum threshold.
+        # This naturally gates out nighttime standby/moonlight without
+        # needing a sun-position check.
+        instant_pv = _sum_states(self.hass, self.entry.data.get(CONF_PV_ENTITIES, []))
+        if instant_pv is None or instant_pv < _MIN_PV_WATTS:
             self._prev_direction = None
             return
 
-        # Gate 2: spline > 0.
+        # Gate 2: spline must be predicting something > 0.
+        # This prevents dividing by zero and stops adjustment during hours
+        # with no historical PV data.
         local_now = dt_util.as_local(now) if now.tzinfo else dt_util.now()
         minute_of_day = local_now.hour * 60 + local_now.minute
         spline = self.spline.value_at_minute(minute_of_day)
@@ -247,16 +211,7 @@ class TrimManager:
             self._prev_direction = None
             return
 
-        # Gate 3: PV sensor must be readable (sun gates already cover time-of-day).
-        instant_pv = _sum_states(self.hass, self.entry.data.get(CONF_PV_ENTITIES, []))
-        if instant_pv is None:
-            self._prev_direction = None
-            return
-
         # --- Step 1: VOLATILITY GUARD ---
-        # Compare instantaneous PV to the rolling average. If they diverge
-        # by more than 25%, use the average — this prevents chasing
-        # cloud spikes on partly-cloudy days.
         averager = self._get_averager()
         pv_avg = averager.pv_average if averager else None
 
@@ -275,70 +230,64 @@ class TrimManager:
         else:
             effective_pv = instant_pv
 
-        # Read SOC and load.
+        # --- Step 2: DIRECTION ---
         soc = _read_float(self.hass, self.entry.data.get(CONF_SOC_ENTITY))
         load = _read_float(self.hass, self.entry.data.get(CONF_INVERTER_ENTITY))
         trimmed_pv = spline * self._factor
         battery_threshold = self._get_battery_threshold()
         battery_full = soc is not None and soc >= battery_threshold
 
-        # --- Step 2: DIRECTION ---
-        # While charging (SOC < threshold): track actual PV symmetrically.
-        # While full  (SOC >= threshold): stricter DOWN — only if load exceeds PV.
-        if effective_pv > trimmed_pv:
-            # Always allowed to adjust UP.
-            target = max(TRIM_MIN, min(TRIM_MAX, effective_pv / spline))
-        elif battery_full and load is not None and (
-            load > effective_pv or load > trimmed_pv
-        ):
-            # Battery full: adjust DOWN only when load exceeds generation.
-            target = max(TRIM_MIN, min(TRIM_MAX, effective_pv / spline))
-        elif not battery_full and effective_pv < trimmed_pv:
-            # Battery charging: adjust DOWN freely to track actual PV.
-            target = max(TRIM_MIN, min(TRIM_MAX, effective_pv / spline))
+        target = max(TRIM_MIN, min(TRIM_MAX, effective_pv / spline))
+
+        if not battery_full:
+            # Battery charging: track actual PV freely in both directions.
+            pass  # always proceed to apply
         else:
-            _LOGGER.debug(
-                "No adjustment: eff_pv=%.0fW trimmed=%.0fW load=%s soc=%s",
-                effective_pv, trimmed_pv,
-                f"{load:.0f}W" if load is not None else "unavailable",
-                f"{soc:.0f}%" if soc is not None else "unavailable",
+            # Battery full: only adjust when there is a meaningful signal.
+            load_exceeds = load is not None and (
+                load > effective_pv or load > trimmed_pv
             )
-            self._prev_direction = None
-            return
+            if not (effective_pv > trimmed_pv or load_exceeds):
+                _LOGGER.debug(
+                    "No adjustment (battery full): eff_pv=%.0fW "
+                    "trimmed=%.0fW load=%s",
+                    effective_pv, trimmed_pv,
+                    f"{load:.0f}W" if load is not None else "unavailable",
+                )
+                self._prev_direction = None
+                return
 
         delta = target - self._factor
 
-        # --- Step 4: ADAPTIVE RATE ---
-        gap_fraction = abs(delta) / self._factor if self._factor > 0 else abs(delta)
+        # Skip if delta is negligible.
+        if abs(delta) < 1e-4:
+            return
+
+        # --- Step 3: ADAPTIVE RATE ---
+        gap_fraction = abs(delta) / self._factor if self._factor > 0 else 1.0
         rate = _adaptive_rate(gap_fraction)
 
-        # --- Step 5: SUSTAIN GATE ---
-        # The adjustment direction must be the same for 2 consecutive ticks
-        # (60s + 60s = ~120s) before we apply it.
+        # --- Step 4: SUSTAIN GATE ---
         current_direction = "up" if delta > 0 else "down"
-
         if self._prev_direction != current_direction:
-            # Direction changed or first tick — record and wait.
             self._prev_direction = current_direction
             _LOGGER.debug(
-                "Sustain: direction=%s, waiting for confirmation next tick "
-                "(target=%.3f, current=%.3f, gap=%.0f%%)",
+                "Sustain: direction=%s — waiting for confirmation "
+                "(target=%.3f current=%.3f gap=%.0f%%)",
                 current_direction, target, self._factor, gap_fraction * 100,
             )
             return
 
-        # Direction confirmed for 2 consecutive ticks — apply.
-        self._prev_direction = current_direction  # keep tracking
+        self._prev_direction = current_direction
 
-        # --- Step 6: APPLY ---
-        new_factor = self._factor + (delta * rate)
-        new_factor = max(0.0, min(1.0, new_factor))
+        # --- Step 5: APPLY ---
+        new_factor = max(TRIM_MIN, min(TRIM_MAX, self._factor + (delta * rate)))
 
         _LOGGER.debug(
-            "Trim adjust: eff_pv=%.0fW spline=%.0fW target=%.3f "
-            "gap=%.0f%% rate=%.3f direction=%s -> %.3f",
-            effective_pv, spline, target, gap_fraction * 100,
-            rate, current_direction, new_factor,
+            "Trim adjust: eff_pv=%.0fW spline=%.0fW trimmed=%.0fW "
+            "target=%.3f gap=%.0f%% rate=%.3f dir=%s -> %.3f",
+            effective_pv, spline, trimmed_pv,
+            target, gap_fraction * 100, rate, current_direction, new_factor,
         )
         self.set_factor(new_factor, source="auto")
 
