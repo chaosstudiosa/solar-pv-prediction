@@ -237,21 +237,32 @@ class TrimManager:
         battery_threshold = self._get_battery_threshold()
         battery_full = soc is not None and soc >= battery_threshold
 
-        target = max(TRIM_MIN, min(TRIM_MAX, effective_pv / spline))
-
         if not battery_full:
             # Battery charging: track actual PV freely in both directions.
-            pass  # always proceed to apply
+            target = max(TRIM_MIN, min(TRIM_MAX, effective_pv / spline))
         else:
-            # Battery full: only adjust when there is a meaningful signal.
+            # Battery full — two separate signals:
+            #
+            # 1. instant_pv > trimmed_pv: actual generation exceeds the
+            #    prediction. Use the live reading (not the smoothed average)
+            #    so the volatility guard cannot accidentally block an UP move.
+            #
+            # 2. load_exceeds: load is drawing more than actual or trimmed PV.
+            #    Use effective_pv (smoothed) — direction is UP or DOWN per maths.
             load_exceeds = load is not None and (
                 load > effective_pv or load > trimmed_pv
             )
-            if not (effective_pv > trimmed_pv or load_exceeds):
+            if instant_pv > trimmed_pv:
+                # Actual generation exceeds prediction → always UP.
+                target = max(TRIM_MIN, min(TRIM_MAX, instant_pv / spline))
+            elif load_exceeds:
+                # Load exceeds generation → UP or DOWN per smoothed value.
+                target = max(TRIM_MIN, min(TRIM_MAX, effective_pv / spline))
+            else:
                 _LOGGER.debug(
-                    "No adjustment (battery full): eff_pv=%.0fW "
+                    "No adjustment (battery full): instant_pv=%.0fW "
                     "trimmed=%.0fW load=%s",
-                    effective_pv, trimmed_pv,
+                    instant_pv, trimmed_pv,
                     f"{load:.0f}W" if load is not None else "unavailable",
                 )
                 self._prev_direction = None
