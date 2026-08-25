@@ -277,11 +277,8 @@ class TrimManager:
                 load is not None
                 and load > (effective_pv + self.load_deadband)
             )
-            pv_proves_underestimate = (
-                effective_pv > (trimmed_pv + self.recovery_deadband)
-            )
 
-            if not load_exceeds and not pv_proves_underestimate:
+            if not load_exceeds:
                 _LOGGER.debug(
                     "Skipping: SOC %.0f%% >= %.0f%%, no update condition met "
                     "(load=%.0f, eff_pv=%.0f, trimmed=%.0f)",
