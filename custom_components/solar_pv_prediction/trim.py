@@ -17,7 +17,6 @@ Logic:
          Adjust only when:
            effective_pv > trimmed_pv          → UP
            OR load > effective_pv             → UP or DOWN
-           OR load > trimmed_pv               → UP or DOWN
          No adjustment if none of those conditions are met.
 
     3. TARGET: target_factor = clamp(effective_pv / spline, 0..TRIM_MAX)
@@ -247,11 +246,9 @@ class TrimManager:
             #    prediction. Use the live reading (not the smoothed average)
             #    so the volatility guard cannot accidentally block an UP move.
             #
-            # 2. load_exceeds: load is drawing more than actual or trimmed PV.
+            # 2. load_exceeds: load is drawing more than actual PV.
             #    Use effective_pv (smoothed) — direction is UP or DOWN per maths.
-            load_exceeds = load is not None and (
-                load > effective_pv or load > trimmed_pv
-            )
+            load_exceeds = load is not None and load > effective_pv
             if instant_pv > trimmed_pv:
                 # Actual generation exceeds prediction → always UP.
                 target = max(TRIM_MIN, min(TRIM_MAX, instant_pv / spline))
